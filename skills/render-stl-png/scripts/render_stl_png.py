@@ -226,6 +226,15 @@ def project_persp(v: Vec3, f: float) -> Tuple[float, float, float]:
     return x, y, z
 
 
+def blend_rgb(base: Tuple[int, int, int], over: Tuple[int, int, int], a: float) -> Tuple[int, int, int]:
+    a = clamp01(a)
+    return (
+        int(base[0] * (1 - a) + over[0] * a),
+        int(base[1] * (1 - a) + over[1] * a),
+        int(base[2] * (1 - a) + over[2] * a),
+    )
+
+
 def draw_grid(img: Image.Image, bg_rgb: Tuple[int, int, int], grid_rgb: Tuple[int, int, int], step: int, alpha: float) -> None:
     if step <= 0:
         return
@@ -235,14 +244,7 @@ def draw_grid(img: Image.Image, bg_rgb: Tuple[int, int, int], grid_rgb: Tuple[in
     w, h = img.size
     pix = img.load()
 
-    def blend(base: Tuple[int, int, int], over: Tuple[int, int, int], a: float) -> Tuple[int, int, int]:
-        return (
-            int(base[0] * (1 - a) + over[0] * a),
-            int(base[1] * (1 - a) + over[1] * a),
-            int(base[2] * (1 - a) + over[2] * a),
-        )
-
-    col = blend(bg_rgb, grid_rgb, a)
+    col = blend_rgb(bg_rgb, grid_rgb, a)
 
     for x in range(0, w, step):
         for y in range(h):
@@ -250,6 +252,46 @@ def draw_grid(img: Image.Image, bg_rgb: Tuple[int, int, int], grid_rgb: Tuple[in
     for y in range(0, h, step):
         for x in range(w):
             pix[x, y] = col
+
+
+def draw_line_z(
+    img: Image.Image,
+    zbuf: List[List[float]],
+    p0: Tuple[float, float, float],
+    p1: Tuple[float, float, float],
+    color: Tuple[int, int, int],
+    alpha: float,
+) -> None:
+    """Draw a 2D line with depth testing (p0/p1 include z in camera space)."""
+    a = clamp01(alpha)
+    if a <= 0:
+        return
+
+    w, h = img.size
+    pix = img.load()
+
+    x0, y0, z0 = p0
+    x1, y1, z1 = p1
+
+    dx = x1 - x0
+    dy = y1 - y0
+    steps = int(max(abs(dx), abs(dy)))
+    if steps <= 0:
+        return
+
+    for i in range(steps + 1):
+        t = i / steps
+        x = x0 + dx * t
+        y = y0 + dy * t
+        z = z0 + (z1 - z0) * t
+        xi = int(round(x))
+        yi = int(round(y))
+        if xi < 0 or xi >= w or yi < 0 or yi >= h:
+            continue
+        if z >= zbuf[yi][xi]:
+            continue
+        # don't write zbuf; grid is behind objects, but can overlap itself
+        pix[xi, yi] = blend_rgb(pix[xi, yi], color, a)
 
 
 def render(
@@ -267,6 +309,11 @@ def render(
     grid_step: int = 80,
     grid_rgb: Tuple[int, int, int] = (42, 49, 58),
     grid_alpha: float = 0.45,
+    ground_grid: bool = False,
+    ground_step: float = 0.0,
+    ground_extent: float = 1.35,
+    ground_rgb: Tuple[int, int, int] = (36, 48, 59),
+    ground_alpha: float = 0.55,
 ) -> None:
     tris = read_stl(stl_path)
     vmin, vmax = bounds(tris)
@@ -315,6 +362,37 @@ def render(
         px = int((x * 0.5 + 0.5) * (size - 1))
         py = int(((-y) * 0.5 + 0.5) * (size - 1))
         return px, py
+
+    def obj_to_cam(p: Vec3) -> Vec3:
+        # object-centered -> rotated -> camera translation
+        pr = rot_x(rot_z(p, az), el)
+        return (pr[0], pr[1], pr[2] - d)
+
+    def cam_to_screen(pc: Vec3) -> Tuple[float, float, float]:
+        x_ndc, y_ndc, zc = project_persp(pc, f)
+        px, py = to_px(x_ndc, y_ndc)
+        return float(px), float(py), float(zc)
+
+    # Optional 3D ground-plane grid: draw first, then the mesh will occlude it via zbuf.
+    if ground_grid:
+        z_plane = (vmin[2] - center[2]) - (0.02 * radius)  # slightly below the model
+        ext = radius * float(ground_extent)
+        step = float(ground_step) if float(ground_step) > 0 else max(1e-6, (2.0 * ext) / 10.0)
+
+        # draw lines on plane z=z_plane in object-centered coordinates
+        x = -ext
+        while x <= ext + 1e-9:
+            p0 = cam_to_screen(obj_to_cam((x, -ext, z_plane)))
+            p1 = cam_to_screen(obj_to_cam((x, ext, z_plane)))
+            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha)
+            x += step
+
+        y = -ext
+        while y <= ext + 1e-9:
+            p0 = cam_to_screen(obj_to_cam((-ext, y, z_plane)))
+            p1 = cam_to_screen(obj_to_cam((ext, y, z_plane)))
+            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha)
+            y += step
 
     # For each face, rasterize
     for ia, ib, ic in faces:
@@ -404,10 +482,16 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--bg", default="#0b0f14")
     ap.add_argument("--color", default="#4cc9f0")
-    ap.add_argument("--grid", action="store_true", help="Draw background grid lines")
+    ap.add_argument("--grid", action="store_true", help="Draw background grid lines (2D screen-space)")
     ap.add_argument("--grid-step", type=int, default=80, help="Grid spacing in pixels")
     ap.add_argument("--grid-color", default="#2a313a", help="Grid line color")
     ap.add_argument("--grid-alpha", type=float, default=0.45, help="Grid opacity 0..1")
+
+    ap.add_argument("--ground-grid", action="store_true", help="Draw a 3D ground-plane grid under the model (occluded by mesh)")
+    ap.add_argument("--ground-step", type=float, default=0.0, help="Ground grid step in model units (0 = auto)")
+    ap.add_argument("--ground-extent", type=float, default=1.35, help="Ground grid extent as radius multiplier")
+    ap.add_argument("--ground-color", default="#24303b", help="Ground grid color")
+    ap.add_argument("--ground-alpha", type=float, default=0.55, help="Ground grid opacity 0..1")
     ap.add_argument("--azim-deg", type=float, default=-35.0)
     ap.add_argument("--elev-deg", type=float, default=25.0)
     ap.add_argument("--fov-deg", type=float, default=35.0)
@@ -431,6 +515,11 @@ def main() -> None:
         grid_step=int(args.grid_step),
         grid_rgb=parse_hex_color(args.grid_color),
         grid_alpha=float(args.grid_alpha),
+        ground_grid=bool(args.ground_grid),
+        ground_step=float(args.ground_step),
+        ground_extent=float(args.ground_extent),
+        ground_rgb=parse_hex_color(args.ground_color),
+        ground_alpha=float(args.ground_alpha),
     )
 
 
