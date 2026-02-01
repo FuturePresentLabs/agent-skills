@@ -669,7 +669,7 @@ def main() -> None:
 
     ap.add_argument("--two-sided", action="store_true", help="Disable backface culling (render both sides; safer for inconsistent STL winding)")
 
-    ap.add_argument("--auto-upright", action="store_true", default=True, help="Auto-rotate model to a stable upright orientation (default: on)")
+    ap.add_argument("--auto-upright", action="store_true", default=False, help="Auto-rotate model to a stable upright orientation (default: off)")
     ap.add_argument("--no-auto-upright", action="store_true", help="Disable auto-upright")
 
     ap.add_argument("--axes", action="store_true", help="Draw XYZ axes triad at the origin on the ground plane")
@@ -725,7 +725,7 @@ def main() -> None:
         axes=bool(args.axes),
         axes_len=float(args.axes_len),
         two_sided=bool(args.two_sided),
-        auto_upright=(False if bool(args.no_auto_upright) else True),
+        auto_upright=(True if bool(args.auto_upright) else False),
     )
 
 
