@@ -499,7 +499,9 @@ def render(
         return float(px), float(py), float(zc)
 
     # Optional 3D ground-plane grid: draw first, then the mesh will occlude it via zbuf.
-    z_plane = (vmin[2] - center[2]) - (0.02 * radius)  # slightly below the model
+    # IMPORTANT: compute the ground plane in the same (auto-uprighted) object frame.
+    minz_u = min(v[2] for v in v0u)
+    z_plane = minz_u - (0.02 * radius)  # slightly below the model
 
     if ground_grid:
         ext = radius * float(ground_extent)
