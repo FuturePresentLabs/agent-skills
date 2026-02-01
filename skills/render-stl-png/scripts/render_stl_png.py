@@ -215,6 +215,12 @@ def rot_x(v: Vec3, ang: float) -> Vec3:
     return (v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c)
 
 
+def rot_y(v: Vec3, ang: float) -> Vec3:
+    c = math.cos(ang)
+    s = math.sin(ang)
+    return (v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c)
+
+
 def mat3_mul_vec(m: Tuple[Vec3, Vec3, Vec3], v: Vec3) -> Vec3:
     (m0, m1, m2) = m
     return (
@@ -445,6 +451,9 @@ def render(
     two_sided: bool = False,
     auto_upright: bool = True,
     auto_yaw: bool = True,
+    rx_deg: float = 0.0,
+    ry_deg: float = 0.0,
+    rz_deg: float = 0.0,
     ambient: float = 0.32,
     light2_dir: Vec3 = (0.6, 0.2, 0.8),
     spec: float = 0.25,
@@ -476,6 +485,19 @@ def render(
     # Auto-upright (pre-rotation in object space)
     v0u = [mat3_mul_vec(upright_R, v) for v in v0]
     n0u = [v_norm(mat3_mul_vec(upright_R, n)) for n in norms]
+
+    # Manual rotation knobs (applied after upright, before auto-yaw and camera)
+    if abs(rx_deg) > 1e-9 or abs(ry_deg) > 1e-9 or abs(rz_deg) > 1e-9:
+        rx = math.radians(rx_deg)
+        ry = math.radians(ry_deg)
+        rz = math.radians(rz_deg)
+
+        def apply_r(v: Vec3) -> Vec3:
+            # Z * Y * X
+            return rot_z(rot_y(rot_x(v, rx), ry), rz)
+
+        v0u = [apply_r(v) for v in v0u]
+        n0u = [v_norm(apply_r(n)) for n in n0u]
 
     # Auto-yaw: rotate around Z so the model's main XY direction is stable across models.
     if auto_yaw and len(v0u) >= 3:
@@ -710,6 +732,10 @@ def main() -> None:
     ap.add_argument("--auto-yaw", action="store_true", default=True, help="Auto-yaw to stabilize view across models (default: on)")
     ap.add_argument("--no-auto-yaw", action="store_true", help="Disable auto-yaw")
 
+    ap.add_argument("--rx", type=float, default=0.0, help="Rotate model around X (degrees)")
+    ap.add_argument("--ry", type=float, default=0.0, help="Rotate model around Y (degrees)")
+    ap.add_argument("--rz", type=float, default=0.0, help="Rotate model around Z (degrees)")
+
     args = ap.parse_args()
 
     render(
@@ -729,6 +755,9 @@ def main() -> None:
         shininess=float(args.shininess),
         gamma=float(args.gamma),
         auto_yaw=(False if bool(args.no_auto_yaw) else True),
+        rx_deg=float(args.rx),
+        ry_deg=float(args.ry),
+        rz_deg=float(args.rz),
         grid=bool(args.grid),
         grid_step=int(args.grid_step),
         grid_rgb=parse_hex_color(args.grid_color),
