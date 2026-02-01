@@ -372,6 +372,7 @@ def draw_line_z(
     p1: Tuple[float, float, float],
     color: Tuple[int, int, int],
     alpha: float,
+    thickness: int = 1,
 ) -> None:
     """Draw a 2D line with depth testing (p0/p1 include z in camera space)."""
     a = clamp01(alpha)
@@ -402,7 +403,20 @@ def draw_line_z(
         if z >= zbuf[yi][xi]:
             continue
         # don't write zbuf; grid is behind objects, but can overlap itself
-        pix[xi, yi] = blend_rgb(pix[xi, yi], color, a)
+        t = max(1, int(thickness))
+        r = t // 2
+        for oy in range(-r, r + 1):
+            yy = yi + oy
+            if yy < 0 or yy >= h:
+                continue
+            row = zbuf[yy]
+            for ox in range(-r, r + 1):
+                xx = xi + ox
+                if xx < 0 or xx >= w:
+                    continue
+                if z >= row[xx]:
+                    continue
+                pix[xx, yy] = blend_rgb(pix[xx, yy], color, a)
 
 
 def render(
@@ -425,6 +439,7 @@ def render(
     ground_extent: float = 1.35,
     ground_rgb: Tuple[int, int, int] = (36, 48, 59),
     ground_alpha: float = 0.55,
+    ground_thickness: int = 2,
     axes: bool = False,
     axes_len: float = 0.9,
     two_sided: bool = False,
@@ -541,25 +556,25 @@ def render(
         while x <= ext + 1e-9:
             p0 = cam_to_screen(obj_to_cam((x, -ext, z_plane)))
             p1 = cam_to_screen(obj_to_cam((x, ext, z_plane)))
-            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha)
+            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha, thickness=ground_thickness)
             x += step
 
         y = -ext
         while y <= ext + 1e-9:
             p0 = cam_to_screen(obj_to_cam((-ext, y, z_plane)))
             p1 = cam_to_screen(obj_to_cam((ext, y, z_plane)))
-            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha)
+            draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha, thickness=ground_thickness)
             y += step
 
     if axes:
         axis_len = radius * float(axes_len)
         o = (0.0, 0.0, z_plane)
         # X axis (red)
-        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((axis_len, 0.0, z_plane))), color=(220, 60, 60), alpha=0.95)
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((axis_len, 0.0, z_plane))), color=(220, 60, 60), alpha=0.95, thickness=3)
         # Y axis (green)
-        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, axis_len, z_plane))), color=(60, 200, 120), alpha=0.95)
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, axis_len, z_plane))), color=(60, 200, 120), alpha=0.95, thickness=3)
         # Z axis (blue) -- draw upward from plane
-        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, 0.0, z_plane + axis_len))), color=(80, 140, 240), alpha=0.95)
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, 0.0, z_plane + axis_len))), color=(80, 140, 240), alpha=0.95, thickness=3)
 
     # For each face, rasterize
     for ia, ib, ic in faces:
@@ -680,6 +695,7 @@ def main() -> None:
     ap.add_argument("--ground-extent", type=float, default=1.35, help="Ground grid extent as radius multiplier")
     ap.add_argument("--ground-color", default="#24303b", help="Ground grid color")
     ap.add_argument("--ground-alpha", type=float, default=0.55, help="Ground grid opacity 0..1")
+    ap.add_argument("--ground-thickness", type=int, default=2, help="Ground grid line thickness in pixels")
     ap.add_argument("--azim-deg", type=float, default=-35.0)
     ap.add_argument("--elev-deg", type=float, default=-35.0)
     ap.add_argument("--fov-deg", type=float, default=35.0)
@@ -722,6 +738,7 @@ def main() -> None:
         ground_extent=float(args.ground_extent),
         ground_rgb=parse_hex_color(args.ground_color),
         ground_alpha=float(args.ground_alpha),
+        ground_thickness=int(args.ground_thickness),
         axes=bool(args.axes),
         axes_len=float(args.axes_len),
         two_sided=bool(args.two_sided),
