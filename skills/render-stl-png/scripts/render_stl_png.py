@@ -226,6 +226,32 @@ def project_persp(v: Vec3, f: float) -> Tuple[float, float, float]:
     return x, y, z
 
 
+def draw_grid(img: Image.Image, bg_rgb: Tuple[int, int, int], grid_rgb: Tuple[int, int, int], step: int, alpha: float) -> None:
+    if step <= 0:
+        return
+    a = clamp01(alpha)
+    if a <= 0:
+        return
+    w, h = img.size
+    pix = img.load()
+
+    def blend(base: Tuple[int, int, int], over: Tuple[int, int, int], a: float) -> Tuple[int, int, int]:
+        return (
+            int(base[0] * (1 - a) + over[0] * a),
+            int(base[1] * (1 - a) + over[1] * a),
+            int(base[2] * (1 - a) + over[2] * a),
+        )
+
+    col = blend(bg_rgb, grid_rgb, a)
+
+    for x in range(0, w, step):
+        for y in range(h):
+            pix[x, y] = col
+    for y in range(0, h, step):
+        for x in range(w):
+            pix[x, y] = col
+
+
 def render(
     stl_path: str,
     out_png: str,
@@ -237,6 +263,10 @@ def render(
     fov_deg: float,
     margin: float,
     light_dir: Vec3,
+    grid: bool = False,
+    grid_step: int = 80,
+    grid_rgb: Tuple[int, int, int] = (42, 49, 58),
+    grid_alpha: float = 0.45,
 ) -> None:
     tris = read_stl(stl_path)
     vmin, vmax = bounds(tris)
@@ -275,6 +305,8 @@ def render(
     L = v_norm(light_dir)
 
     img = Image.new("RGB", (size, size), bg_rgb)
+    if grid:
+        draw_grid(img, bg_rgb=bg_rgb, grid_rgb=grid_rgb, step=grid_step, alpha=grid_alpha)
     pix = img.load()
     zbuf = [[float("inf")] * size for _ in range(size)]
 
@@ -372,6 +404,10 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--bg", default="#0b0f14")
     ap.add_argument("--color", default="#4cc9f0")
+    ap.add_argument("--grid", action="store_true", help="Draw background grid lines")
+    ap.add_argument("--grid-step", type=int, default=80, help="Grid spacing in pixels")
+    ap.add_argument("--grid-color", default="#2a313a", help="Grid line color")
+    ap.add_argument("--grid-alpha", type=float, default=0.45, help="Grid opacity 0..1")
     ap.add_argument("--azim-deg", type=float, default=-35.0)
     ap.add_argument("--elev-deg", type=float, default=25.0)
     ap.add_argument("--fov-deg", type=float, default=35.0)
@@ -391,6 +427,10 @@ def main() -> None:
         fov_deg=args.fov_deg,
         margin=args.margin,
         light_dir=parse_vec3(args.light_dir),
+        grid=bool(args.grid),
+        grid_step=int(args.grid_step),
+        grid_rgb=parse_hex_color(args.grid_color),
+        grid_alpha=float(args.grid_alpha),
     )
 
 
