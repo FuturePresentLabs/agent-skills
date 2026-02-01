@@ -6,9 +6,10 @@ Design goals:
 - Quote-friendly outputs: units, clean layers, closed profiles
 - Minimal entity set for maximum compatibility (DXF R12-ish)
 
-Supported part types (v0):
+Supported part types:
 - "plate": rectangular plate with optional corner radius, holes, and slots (cut geometry)
-- "drawing": rounded-rect outline with etch geometry (circles / rounded-rects) for illustrations
+- "polyline": arbitrary closed polyline cut profile (e.g., silhouettes like a state outline)
+- "drawing": rounded-rect outline with etch geometry (circles / rounded-rects / polylines / svg paths) for illustrations
 
 Usage:
   python3 scripts/rfq_cad.py validate spec.json
@@ -79,6 +80,14 @@ class PlateSpec:
     layer_profile: str = "PROFILE"
     layer_holes: str = "HOLES"
     layer_notes: str = "NOTES"
+
+
+@dataclass
+class PolylineSpec:
+    units: str
+    points: List[Tuple[float, float]]
+    closed: bool = True
+    layer: str = "CUT_OUTER"
 
 
 @dataclass
@@ -221,6 +230,32 @@ def validate_plate(p: PlateSpec) -> None:
         r = max(s.length, s.width) / 2
         if not inside(s.x, s.y, r):
             raise ValueError(f"slot at ({s.x},{s.y}) may exit profile (conservative check)")
+
+
+def parse_polyline(spec: Dict[str, Any]) -> PolylineSpec:
+    kind = _req(spec, "kind", str)
+    if kind != "polyline":
+        raise ValueError(f"unsupported kind for polyline parser: {kind}")
+
+    units = _req(spec, "units", str)
+    if units not in ("mm", "in"):
+        raise ValueError("units must be 'mm' or 'in'")
+
+    pts_in = _req(spec, "points", list)
+    pts: List[Tuple[float, float]] = []
+    for pt in pts_in:
+        if not isinstance(pt, dict):
+            raise ValueError("points[] entries must be objects")
+        pts.append((float(_req(pt, "x", (int, float))), float(_req(pt, "y", (int, float)))))
+    closed = bool(_opt(spec, "closed", bool, True))
+    layer = str(_opt(spec, "layer", str, "CUT_OUTER") or "CUT_OUTER")
+
+    return PolylineSpec(units=units, points=pts, closed=closed, layer=layer)
+
+
+def validate_polyline(p: PolylineSpec) -> None:
+    if len(p.points) < 3:
+        raise ValueError("polyline must have at least 3 points")
 
 
 def parse_drawing(spec: Dict[str, Any]) -> DrawingSpec:
@@ -872,6 +907,48 @@ def render_dxf_drawing(d: DrawingSpec, out_path: str) -> None:
         f.write(content)
 
 
+def render_dxf_polyline(p: PolylineSpec, out_path: str) -> None:
+    ents: List[str] = []
+    verts = [(x, y, 0.0) for (x, y) in p.points]
+    ents += dxf_lwpolyline(p.layer, verts, closed=p.closed)
+    content = "\n".join(dxf_header(p.units) + ents + dxf_footer()) + "\n"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def render_svg_polyline(p: PolylineSpec, out_path: str) -> None:
+    pad = 10.0 if p.units == "mm" else 0.4
+    xs = [x for x, _ in p.points]
+    ys = [y for _, y in p.points]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    width = (maxx - minx) + 2 * pad
+    height = (maxy - miny) + 2 * pad
+
+    def m(x: float, y: float) -> Tuple[float, float]:
+        return ((x - minx) + pad, (maxy - y) + pad)
+
+    pts = [m(x, y) for (x, y) in p.points]
+    if not pts:
+        raise ValueError("empty polyline")
+    dcmd = [f"M {pts[0][0]:.3f},{pts[0][1]:.3f}"]
+    for x, y in pts[1:]:
+        dcmd.append(f"L {x:.3f},{y:.3f}")
+    if p.closed:
+        dcmd.append("Z")
+
+    meta = f"units={p.units}; pad={pad}"
+    svg = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        f"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width:.3f}\" height=\"{height:.3f}\" viewBox=\"0 0 {width:.3f} {height:.3f}\">\n"
+        f"<!-- {meta} -->\n"
+        f"<path d=\"{' '.join(dcmd)}\" fill=\"none\" stroke=\"black\" stroke-width=\"0.6\" stroke-linejoin=\"round\"/>\n"
+        "</svg>\n"
+    )
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(svg)
+
+
 def render_dxf(p: PlateSpec, out_path: str) -> None:
     ents: List[str] = []
 
@@ -951,6 +1028,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if kind == "plate":
         p = parse_plate(spec)
         validate_plate(p)
+    elif kind == "polyline":
+        p = parse_polyline(spec)
+        validate_polyline(p)
     elif kind == "drawing":
         d = parse_drawing(spec)
         validate_drawing(d)
@@ -977,11 +1057,14 @@ def cmd_render(args: argparse.Namespace) -> int:
         validate_plate(p)
         render_dxf(p, dxf_path)
         render_svg(p, svg_path)
+    elif kind == "polyline":
+        p = parse_polyline(spec)
+        validate_polyline(p)
+        render_dxf_polyline(p, dxf_path)
+        render_svg_polyline(p, svg_path)
     elif kind == "drawing":
         d = parse_drawing(spec)
         validate_drawing(d)
-        # For drawings, reuse the plate SVG generator by treating etch shapes as holes/slots? We'll
-        # implement a dedicated SVG generator inline here.
         render_dxf_drawing(d, dxf_path)
         render_svg_drawing(d, svg_path)
     else:
