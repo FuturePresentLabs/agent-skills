@@ -314,6 +314,9 @@ def render(
     ground_extent: float = 1.35,
     ground_rgb: Tuple[int, int, int] = (36, 48, 59),
     ground_alpha: float = 0.55,
+    axes: bool = False,
+    axes_len: float = 0.9,
+    two_sided: bool = False,
 ) -> None:
     tris = read_stl(stl_path)
     vmin, vmax = bounds(tris)
@@ -349,7 +352,7 @@ def render(
     vcam = [(v[0], v[1], v[2] - d) for v in v1]
 
     # Light
-    L = v_norm(light_dir)
+    light = v_norm(light_dir)
 
     img = Image.new("RGB", (size, size), bg_rgb)
     if grid:
@@ -374,8 +377,9 @@ def render(
         return float(px), float(py), float(zc)
 
     # Optional 3D ground-plane grid: draw first, then the mesh will occlude it via zbuf.
+    z_plane = (vmin[2] - center[2]) - (0.02 * radius)  # slightly below the model
+
     if ground_grid:
-        z_plane = (vmin[2] - center[2]) - (0.02 * radius)  # slightly below the model
         ext = radius * float(ground_extent)
         step = float(ground_step) if float(ground_step) > 0 else max(1e-6, (2.0 * ext) / 10.0)
 
@@ -394,16 +398,28 @@ def render(
             draw_line_z(img, zbuf, p0, p1, color=ground_rgb, alpha=ground_alpha)
             y += step
 
+    if axes:
+        axis_len = radius * float(axes_len)
+        o = (0.0, 0.0, z_plane)
+        # X axis (red)
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((axis_len, 0.0, z_plane))), color=(220, 60, 60), alpha=0.95)
+        # Y axis (green)
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, axis_len, z_plane))), color=(60, 200, 120), alpha=0.95)
+        # Z axis (blue) -- draw upward from plane
+        draw_line_z(img, zbuf, cam_to_screen(obj_to_cam(o)), cam_to_screen(obj_to_cam((0.0, 0.0, z_plane + axis_len))), color=(80, 140, 240), alpha=0.95)
+
     # For each face, rasterize
     for ia, ib, ic in faces:
         a = vcam[ia]
         b = vcam[ib]
         c = vcam[ic]
 
-        # Backface cull in camera space: compute face normal and check facing
-        fn = v_cross(v_sub(b, a), v_sub(c, a))
-        if fn[2] >= 0:  # facing away (camera looks down -Z)
-            continue
+        # Backface cull in camera space: compute face normal and check facing.
+        # If the STL has inconsistent winding, culling creates "missing" faces.
+        if not two_sided:
+            fn = v_cross(v_sub(b, a), v_sub(c, a))
+            if fn[2] >= 0:  # facing away (camera looks down -Z)
+                continue
 
         ax, ay, azc = project_persp(a, f)
         bx, by, bzc = project_persp(b, f)
@@ -461,7 +477,7 @@ def render(
                 )
 
                 # Lambert + ambient
-                ndotl = clamp01(v_dot(n, L))
+                ndotl = clamp01(v_dot(n, light))
                 ambient = 0.20
                 diffuse = 0.90 * ndotl
                 shade = clamp01(ambient + diffuse)
@@ -487,12 +503,16 @@ def main() -> None:
     ap.add_argument("--grid-color", default="#2a313a", help="Grid line color")
     ap.add_argument("--grid-alpha", type=float, default=0.45, help="Grid opacity 0..1")
 
+    ap.add_argument("--two-sided", action="store_true", help="Disable backface culling (render both sides; safer for inconsistent STL winding)")
+    ap.add_argument("--axes", action="store_true", help="Draw XYZ axes triad at the origin on the ground plane")
+    ap.add_argument("--axes-len", type=float, default=0.9, help="Axes length as radius multiplier")
+
     ap.add_argument("--ground-grid", action="store_true", help="Draw a 3D ground-plane grid under the model (occluded by mesh)")
     ap.add_argument("--ground-step", type=float, default=0.0, help="Ground grid step in model units (0 = auto)")
     ap.add_argument("--ground-extent", type=float, default=1.35, help="Ground grid extent as radius multiplier")
     ap.add_argument("--ground-color", default="#24303b", help="Ground grid color")
     ap.add_argument("--ground-alpha", type=float, default=0.55, help="Ground grid opacity 0..1")
-    ap.add_argument("--azim-deg", type=float, default=-35.0)
+    ap.add_argument("--azim-deg", type=float, default=-45.0)
     ap.add_argument("--elev-deg", type=float, default=25.0)
     ap.add_argument("--fov-deg", type=float, default=35.0)
     ap.add_argument("--margin", type=float, default=0.08)
@@ -520,6 +540,9 @@ def main() -> None:
         ground_extent=float(args.ground_extent),
         ground_rgb=parse_hex_color(args.ground_color),
         ground_alpha=float(args.ground_alpha),
+        axes=bool(args.axes),
+        axes_len=float(args.axes_len),
+        two_sided=bool(args.two_sided),
     )
 
 
