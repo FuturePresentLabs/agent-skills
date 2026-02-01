@@ -17,7 +17,7 @@ import math
 import os
 import struct
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, Dict
 
 from PIL import Image
 
@@ -215,6 +215,117 @@ def rot_x(v: Vec3, ang: float) -> Vec3:
     return (v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c)
 
 
+def mat3_mul_vec(m: Tuple[Vec3, Vec3, Vec3], v: Vec3) -> Vec3:
+    (m0, m1, m2) = m
+    return (
+        m0[0] * v[0] + m0[1] * v[1] + m0[2] * v[2],
+        m1[0] * v[0] + m1[1] * v[1] + m1[2] * v[2],
+        m2[0] * v[0] + m2[1] * v[1] + m2[2] * v[2],
+    )
+
+
+def rotation_from_to(a: Vec3, b: Vec3) -> Tuple[Vec3, Vec3, Vec3]:
+    """Return 3x3 rotation matrix that rotates vector a onto b (both need not be unit)."""
+    au = v_norm(a)
+    bu = v_norm(b)
+    dot = clamp01((v_dot(au, bu) + 1.0) / 2.0) * 2.0 - 1.0  # stable clamp to [-1,1]
+    dot = max(-1.0, min(1.0, dot))
+
+    if dot > 1.0 - 1e-9:
+        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+    if dot < -1.0 + 1e-9:
+        # 180 deg: choose any orthogonal axis
+        axis = v_norm(v_cross(au, (1.0, 0.0, 0.0)))
+        if v_len(axis) < 1e-6:
+            axis = v_norm(v_cross(au, (0.0, 1.0, 0.0)))
+        x, y, z = axis
+        # Rodrigues with angle pi => R = -I + 2*axis*axis^T
+        return (
+            (-1.0 + 2 * x * x, 2 * x * y, 2 * x * z),
+            (2 * y * x, -1.0 + 2 * y * y, 2 * y * z),
+            (2 * z * x, 2 * z * y, -1.0 + 2 * z * z),
+        )
+
+    axis = v_norm(v_cross(au, bu))
+    ang = math.acos(dot)
+    x, y, z = axis
+    c = math.cos(ang)
+    s = math.sin(ang)
+    C = 1.0 - c
+    # Rodrigues rotation matrix
+    return (
+        (c + x * x * C, x * y * C - z * s, x * z * C + y * s),
+        (y * x * C + z * s, c + y * y * C, y * z * C - x * s),
+        (z * x * C - y * s, z * y * C + x * s, c + z * z * C),
+    )
+
+
+def auto_upright_rotation(tris: Sequence[Tri], center: Vec3, radius: float) -> Tuple[Vec3, Vec3, Vec3]:
+    """Heuristic: pick a face-normal (from large triangles) that yields max bottom support area."""
+    # Collect candidates from largest triangles
+    scored: List[Tuple[float, Vec3]] = []
+    for t in tris:
+        a = tri_area(t)
+        if a <= 1e-10:
+            continue
+        n = tri_normal(t)
+        scored.append((a, n))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    candidates = [n for _, n in scored[:250]]
+
+    # Dedup by quantized direction
+    uniq: Dict[Tuple[int, int, int], Vec3] = {}
+    for n in candidates:
+        nn = v_norm(n)
+        k = (int(round(nn[0] * 20)), int(round(nn[1] * 20)), int(round(nn[2] * 20)))
+        uniq.setdefault(k, nn)
+
+    # Evaluate both n and -n (either could be "up")
+    test_dirs: List[Vec3] = []
+    for nn in uniq.values():
+        test_dirs.append(nn)
+        test_dirs.append(v_mul(nn, -1.0))
+
+    up = (0.0, 0.0, 1.0)
+    best_R = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    best_score = -1.0
+
+    eps = 0.01 * radius
+
+    for d in test_dirs:
+        R = rotation_from_to(d, up)
+
+        # Compute min z after rotation
+        minz = float("inf")
+        for t in tris:
+            for v in (t.a, t.b, t.c):
+                vc = v_sub(v, center)
+                vr = mat3_mul_vec(R, vc)
+                if vr[2] < minz:
+                    minz = vr[2]
+
+        # Support area = sum area of triangles that lie on the bottom plane (within eps)
+        support = 0.0
+        for t in tris:
+            ar = tri_area(t)
+            if ar <= 1e-10:
+                continue
+            vs = []
+            for v in (t.a, t.b, t.c):
+                vc = v_sub(v, center)
+                vr = mat3_mul_vec(R, vc)
+                vs.append(vr)
+            if max(v[2] for v in vs) <= minz + eps:
+                support += ar
+
+        if support > best_score:
+            best_score = support
+            best_R = R
+
+    return best_R
+
+
 def project_persp(v: Vec3, f: float) -> Tuple[float, float, float]:
     # v is in camera space; camera looks down -Z
     z = v[2]
@@ -317,6 +428,7 @@ def render(
     axes: bool = False,
     axes_len: float = 0.9,
     two_sided: bool = False,
+    auto_upright: bool = True,
 ) -> None:
     tris = read_stl(stl_path)
     vmin, vmax = bounds(tris)
@@ -328,6 +440,11 @@ def render(
 
     verts, faces, norms = build_vertex_normals(tris)
 
+    # Optional: auto-upright (rotate model so it "stands" on its largest supporting face)
+    upright_R = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    if auto_upright:
+        upright_R = auto_upright_rotation(tris, center=center, radius=radius)
+
     # Camera
     az = math.radians(azim_deg)
     el = math.radians(elev_deg)
@@ -335,9 +452,13 @@ def render(
     # Put mesh at origin
     v0 = [v_sub(v, center) for v in verts]
 
+    # Auto-upright (pre-rotation in object space)
+    v0u = [mat3_mul_vec(upright_R, v) for v in v0]
+    n0u = [v_norm(mat3_mul_vec(upright_R, n)) for n in norms]
+
     # Apply view rotation (object rotation into camera frame)
-    v1 = [rot_x(rot_z(v, az), el) for v in v0]
-    n1 = [v_norm(rot_x(rot_z(n, az), el)) for n in norms]
+    v1 = [rot_x(rot_z(v, az), el) for v in v0u]
+    n1 = [v_norm(rot_x(rot_z(n, az), el)) for n in n0u]
 
     # Compute required camera distance to fit within FOV.
     # We approximate by using bounding sphere and focal length.
@@ -367,8 +488,9 @@ def render(
         return px, py
 
     def obj_to_cam(p: Vec3) -> Vec3:
-        # object-centered -> rotated -> camera translation
-        pr = rot_x(rot_z(p, az), el)
+        # object-centered -> upright -> view rotation -> camera translation
+        pu = mat3_mul_vec(upright_R, p)
+        pr = rot_x(rot_z(pu, az), el)
         return (pr[0], pr[1], pr[2] - d)
 
     def cam_to_screen(pc: Vec3) -> Tuple[float, float, float]:
@@ -504,6 +626,10 @@ def main() -> None:
     ap.add_argument("--grid-alpha", type=float, default=0.45, help="Grid opacity 0..1")
 
     ap.add_argument("--two-sided", action="store_true", help="Disable backface culling (render both sides; safer for inconsistent STL winding)")
+
+    ap.add_argument("--auto-upright", action="store_true", default=True, help="Auto-rotate model to a stable upright orientation (default: on)")
+    ap.add_argument("--no-auto-upright", action="store_true", help="Disable auto-upright")
+
     ap.add_argument("--axes", action="store_true", help="Draw XYZ axes triad at the origin on the ground plane")
     ap.add_argument("--axes-len", type=float, default=0.9, help="Axes length as radius multiplier")
 
@@ -543,6 +669,7 @@ def main() -> None:
         axes=bool(args.axes),
         axes_len=float(args.axes_len),
         two_sided=bool(args.two_sided),
+        auto_upright=(False if bool(args.no_auto_upright) else True),
     )
 
 
