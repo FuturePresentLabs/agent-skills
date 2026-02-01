@@ -429,6 +429,12 @@ def render(
     axes_len: float = 0.9,
     two_sided: bool = False,
     auto_upright: bool = True,
+    auto_yaw: bool = True,
+    ambient: float = 0.32,
+    light2_dir: Vec3 = (0.6, 0.2, 0.8),
+    spec: float = 0.25,
+    shininess: float = 40.0,
+    gamma: float = 1.8,
 ) -> None:
     tris = read_stl(stl_path)
     vmin, vmax = bounds(tris)
@@ -456,6 +462,28 @@ def render(
     v0u = [mat3_mul_vec(upright_R, v) for v in v0]
     n0u = [v_norm(mat3_mul_vec(upright_R, n)) for n in norms]
 
+    # Auto-yaw: rotate around Z so the model's main XY direction is stable across models.
+    if auto_yaw and len(v0u) >= 3:
+        xs = [v[0] for v in v0u]
+        ys = [v[1] for v in v0u]
+        mx = sum(xs) / len(xs)
+        my = sum(ys) / len(ys)
+        cxx = sum((x - mx) * (x - mx) for x in xs) / len(xs)
+        cyy = sum((y - my) * (y - my) for y in ys) / len(ys)
+        cxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / len(xs)
+        tr = cxx + cyy
+        det = cxx * cyy - cxy * cxy
+        disc = max(0.0, tr * tr - 4.0 * det)
+        lam = (tr + math.sqrt(disc)) / 2.0
+        vx = cxy
+        vy = (lam - cxx)
+        if abs(vx) < 1e-12 and abs(vy) < 1e-12:
+            vx, vy = 1.0, 0.0
+        ang = math.atan2(vy, vx)
+        yaw = -ang
+        v0u = [rot_z(v, yaw) for v in v0u]
+        n0u = [v_norm(rot_z(n, yaw)) for n in n0u]
+
     # Apply view rotation (object rotation into camera frame)
     v1 = [rot_x(rot_z(v, az), el) for v in v0u]
     n1 = [v_norm(rot_x(rot_z(n, az), el)) for n in n0u]
@@ -472,8 +500,9 @@ def render(
     # Translate camera back along +Z in object space, so points are at z=-d ...
     vcam = [(v[0], v[1], v[2] - d) for v in v1]
 
-    # Light
-    light = v_norm(light_dir)
+    # Lights
+    key = v_norm(light_dir)
+    fill = v_norm(light2_dir)
 
     img = Image.new("RGB", (size, size), bg_rgb)
     if grid:
@@ -600,15 +629,26 @@ def render(
                     )
                 )
 
-                # Lambert + ambient
-                ndotl = clamp01(v_dot(n, light))
-                ambient = 0.20
-                diffuse = 0.90 * ndotl
-                shade = clamp01(ambient + diffuse)
+                # Lighting: key + fill + ambient + a bit of specular
+                ndk = clamp01(v_dot(n, key))
+                ndf = clamp01(v_dot(n, fill))
 
-                r = int(color_rgb[0] * shade)
-                g = int(color_rgb[1] * shade)
-                bcol = int(color_rgb[2] * shade)
+                # View vector ~ towards camera in camera space
+                vdir = (0.0, 0.0, 1.0)
+                h1 = v_norm(v_add(key, vdir))
+                h2 = v_norm(v_add(fill, vdir))
+                spec1 = (max(0.0, v_dot(n, h1)) ** shininess)
+                spec2 = (max(0.0, v_dot(n, h2)) ** shininess)
+
+                shade = clamp01(float(ambient) + 0.85 * ndk + 0.45 * ndf + float(spec) * (0.6 * spec1 + 0.4 * spec2))
+
+                # Gamma-ish output to avoid crushed darks
+                invg = 1.0 / max(0.5, float(gamma))
+                shade_g = shade ** invg
+
+                r = int(color_rgb[0] * shade_g)
+                g = int(color_rgb[1] * shade_g)
+                bcol = int(color_rgb[2] * shade_g)
                 pix[px, py] = (r, g, bcol)
 
     os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
@@ -645,6 +685,14 @@ def main() -> None:
     ap.add_argument("--fov-deg", type=float, default=35.0)
     ap.add_argument("--margin", type=float, default=0.08)
     ap.add_argument("--light-dir", default="-0.4,-0.3,1.0")
+    ap.add_argument("--light2-dir", default="0.6,0.2,0.8", help="Secondary fill light")
+    ap.add_argument("--ambient", type=float, default=0.32)
+    ap.add_argument("--spec", type=float, default=0.25, help="Specular strength")
+    ap.add_argument("--shininess", type=float, default=40.0)
+    ap.add_argument("--gamma", type=float, default=1.8, help="Output gamma (1=linear)")
+
+    ap.add_argument("--auto-yaw", action="store_true", default=True, help="Auto-yaw to stabilize view across models (default: on)")
+    ap.add_argument("--no-auto-yaw", action="store_true", help="Disable auto-yaw")
 
     args = ap.parse_args()
 
@@ -659,6 +707,12 @@ def main() -> None:
         fov_deg=args.fov_deg,
         margin=args.margin,
         light_dir=parse_vec3(args.light_dir),
+        light2_dir=parse_vec3(args.light2_dir),
+        ambient=float(args.ambient),
+        spec=float(args.spec),
+        shininess=float(args.shininess),
+        gamma=float(args.gamma),
+        auto_yaw=(False if bool(args.no_auto_yaw) else True),
         grid=bool(args.grid),
         grid_step=int(args.grid_step),
         grid_rgb=parse_hex_color(args.grid_color),
