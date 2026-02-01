@@ -46,7 +46,11 @@ if [[ -z "$OUT" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$SCRIPT_DIR/.venv"
+# Keep venv out of the git repo.
+VENV_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/agent-skills"
+VENV="$VENV_BASE/image-to-relief-stl-venv"
+
+mkdir -p "$VENV_BASE"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
   python3 -m venv "$VENV"
