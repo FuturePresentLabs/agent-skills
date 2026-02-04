@@ -95,10 +95,8 @@ def lookup_with_playwright(url, extract_fn, tracking_number, carrier_name):
             page = context.new_page()
             
             try:
-                page.goto(url, wait_until='networkidle', timeout=30000)
-                
-                # Wait a bit for JS to render
-                page.wait_for_timeout(2000)
+                # Use domcontentloaded for faster loading, then wait for JS
+                page.goto(url, wait_until='domcontentloaded', timeout=30000)
                 
                 # Extract data using provided function
                 result = extract_fn(page, tracking_number)
@@ -146,62 +144,87 @@ def extract_usps_data(page, tracking_number):
     }
     
     try:
-        # Look for status text
-        status_selectors = [
-            '[data-testid="status-text"]',
-            '.status-text',
-            '.tracking-status',
-            'h2.status',
-            '[class*="status"]',
-            '[class*="Status"]'
+        # Wait longer for USPS to load
+        page.wait_for_timeout(8000)
+        
+        # Try to scroll to load lazy content
+        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        page.wait_for_timeout(2000)
+        
+        # Look for status text - try multiple patterns
+        status_patterns = [
+            'delivered',
+            'in transit',
+            'out for delivery',
+            'picked up',
+            'shipped',
+            'arrived',
+            'departed'
         ]
         
-        for selector in status_selectors:
-            try:
-                element = page.locator(selector).first
-                if element.is_visible():
-                    result['status'] = element.inner_text().strip()
-                    break
-            except:
-                continue
+        content = page.content().lower()
+        for pattern in status_patterns:
+            if pattern in content:
+                result['status'] = pattern.title()
+                break
         
-        # Look for delivery date
-        date_selectors = [
-            '[data-testid="delivery-date"]',
-            '.delivery-date',
-            '.expected-delivery',
-            '[class*="delivery"]',
-            '[class*="Delivery"]'
+        # Look for delivery date with regex
+        import re
+        date_patterns = [
+            r'(?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2},? \d{4}',
+            r'\d{1,2}/\d{1,2}/\d{4}',
+            r'\d{1,2}-\d{1,2}-\d{4}'
         ]
         
-        for selector in date_selectors:
-            try:
-                element = page.locator(selector).first
-                if element.is_visible():
-                    result['estimated_delivery'] = element.inner_text().strip()
-                    break
-            except:
-                continue
+        for pattern in date_patterns:
+            matches = re.findall(pattern, page.content())
+            if matches:
+                result['estimated_delivery'] = matches[0]
+                break
         
         # Look for tracking events/history
         try:
-            events = page.locator('.tracking-event, .history-event, [class*="event"]').all()
-            for event in events[:5]:  # Limit to first 5 events
+            # USPS often uses specific class names
+            event_selectors = [
+                '.tracking-event',
+                '.history-event', 
+                '.event-row',
+                '[class*="event"]',
+                '[class*="history"]',
+                'tr',  # Table rows as fallback
+                'li'   # List items as fallback
+            ]
+            
+            for selector in event_selectors:
                 try:
-                    text = event.inner_text().strip()
-                    if text and len(text) > 10:
-                        result['details'].append(text)
+                    events = page.locator(selector).all()
+                    for event in events[:5]:
+                        try:
+                            text = event.inner_text().strip()
+                            if text and len(text) > 10 and text not in result['details']:
+                                # Filter out header/footer text
+                                if any(keyword in text.lower() for keyword in ['delivered', 'transit', 'shipped', 'arrived', 'departed', 'processed']):
+                                    result['details'].append(text)
+                        except:
+                            continue
+                    if result['details']:
+                        break
                 except:
                     continue
         except:
             pass
         
-        # If no status found, try to get page title
+        # If still no status, check page title
         if result['status'] == 'Unknown':
             try:
                 title = page.title()
-                if title and title != '':
+                if title:
                     result['page_title'] = title
+                    # Try to extract status from title
+                    for pattern in status_patterns:
+                        if pattern in title.lower():
+                            result['status'] = pattern.title()
+                            break
             except:
                 pass
         
@@ -230,31 +253,47 @@ def extract_ward_data(page, tracking_number):
     }
     
     try:
+        # Wait for page to load
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_timeout(1000)
+        
         # Fill in the tracking form
         try:
-            # Look for PRO number input
-            pro_input = page.locator('input[name="proNumbers"], input[name*="pro"], textarea[name="proNumbers"]').first
+            # Ward uses specific field names: TraceShipmentProNumber[0][NUMBER]
+            pro_input = page.locator('input[name="TraceShipmentProNumber[0][NUMBER]"]').first
+            
             if pro_input.is_visible():
                 pro_input.fill(tracking_number)
+                result['debug'] = f"Filled PRO number: {tracking_number}"
+            else:
+                result['debug'] = "Could not find PRO input field"
             
-            # Look for submit button
-            submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Track"), button:has-text("Search")').first
+            # Look for submit button - Ward uses "Trace Shipments"
+            submit_btn = page.locator('input[type="submit"][value="Trace Shipments"]').first
+            
             if submit_btn.is_visible():
                 submit_btn.click()
-                # Wait for results
+                result['debug'] = result.get('debug', '') + " | Clicked Trace Shipments button"
+                
+                # Wait for results to load
                 page.wait_for_load_state('networkidle')
-                page.wait_for_timeout(3000)
-        except:
-            pass  # Form might already be submitted via URL params
+                page.wait_for_timeout(5000)  # Give extra time for JS to render
+            else:
+                result['debug'] = result.get('debug', '') + " | Could not find submit button"
+                
+        except Exception as e:
+            result['debug'] = f"Form error: {str(e)}"
         
-        # Look for status information
+        # Look for status information after form submission
         status_selectors = [
             '.status',
             '.shipment-status',
             '.tracking-status',
             '[class*="status"]',
             'h2:has-text("Status")',
-            'h3:has-text("Status")'
+            'h3:has-text("Status")',
+            '.result-status',
+            '.shipment-result'
         ]
         
         for selector in status_selectors:
@@ -268,11 +307,13 @@ def extract_ward_data(page, tracking_number):
         
         # Look for shipment details table/rows
         try:
-            rows = page.locator('table tr, .shipment-row, .tracking-row').all()
+            # Try to find data rows (not header rows)
+            rows = page.locator('table tbody tr, .shipment-row, .tracking-row, .result-row').all()
             for row in rows[:10]:
                 try:
                     text = row.inner_text().strip()
-                    if text and len(text) > 5:
+                    # Skip header/form rows
+                    if text and len(text) > 10 and 'Ward Pro' not in text and 'Type' not in text:
                         result['details'].append(text.replace('\n', ' | '))
                 except:
                     continue
@@ -281,16 +322,31 @@ def extract_ward_data(page, tracking_number):
         
         # Look for location information
         try:
-            location_elems = page.locator('.location, .facility, .terminal, [class*="location"]').all()
-            for loc in location_elems[:3]:
+            location_elems = page.locator('.location, .facility, .terminal, [class*="location"], .origin, .destination').all()
+            for loc in location_elems[:5]:
                 try:
                     text = loc.inner_text().strip()
-                    if text:
+                    if text and len(text) < 100:
                         result['locations'].append(text)
                 except:
                     continue
         except:
             pass
+        
+        # If still no data, try to get any table data
+        if not result['details']:
+            try:
+                all_tables = page.locator('table').all()
+                for table in all_tables:
+                    try:
+                        text = table.inner_text().strip()
+                        if text and len(text) > 50:
+                            result['raw_table'] = text[:500]  # First 500 chars
+                            break
+                    except:
+                        continue
+            except:
+                pass
         
     except Exception as e:
         result['error'] = str(e)
