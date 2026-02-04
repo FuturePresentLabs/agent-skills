@@ -88,10 +88,31 @@ def lookup_with_playwright(url, extract_fn, tracking_number, carrier_name):
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (compatible; PackageTracker/1.0)'
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process'
+                ]
             )
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080},
+                locale='en-US',
+                timezone_id='America/New_York'
+            )
+            
+            # Add script to hide webdriver property
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+            """)
+            
             page = context.new_page()
             
             try:
@@ -140,101 +161,88 @@ def extract_usps_data(page, tracking_number):
         'url': page.url,
         'status': 'Unknown',
         'details': [],
-        'estimated_delivery': None
+        'estimated_delivery': None,
+        'location': None
     }
     
     try:
-        # Wait longer for USPS to load
-        page.wait_for_timeout(8000)
+        # Wait for USPS to load
+        page.wait_for_timeout(5000)
         
-        # Try to scroll to load lazy content
-        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-        page.wait_for_timeout(2000)
+        # Get page text content
+        text = page.inner_text('body')
         
-        # Look for status text - try multiple patterns
-        status_patterns = [
-            'delivered',
-            'in transit',
-            'out for delivery',
-            'picked up',
-            'shipped',
-            'arrived',
-            'departed'
-        ]
-        
-        content = page.content().lower()
-        for pattern in status_patterns:
-            if pattern in content:
-                result['status'] = pattern.title()
-                break
-        
-        # Look for delivery date with regex
-        import re
-        date_patterns = [
-            r'(?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2},? \d{4}',
-            r'\d{1,2}/\d{1,2}/\d{4}',
-            r'\d{1,2}-\d{1,2}-\d{4}'
-        ]
-        
-        for pattern in date_patterns:
-            matches = re.findall(pattern, page.content())
-            if matches:
-                result['estimated_delivery'] = matches[0]
-                break
-        
-        # Look for tracking events/history
-        try:
-            # USPS often uses specific class names
-            event_selectors = [
-                '.tracking-event',
-                '.history-event', 
-                '.event-row',
-                '[class*="event"]',
-                '[class*="history"]',
-                'tr',  # Table rows as fallback
-                'li'   # List items as fallback
-            ]
-            
-            for selector in event_selectors:
-                try:
-                    events = page.locator(selector).all()
-                    for event in events[:5]:
-                        try:
-                            text = event.inner_text().strip()
-                            if text and len(text) > 10 and text not in result['details']:
-                                # Filter out header/footer text
-                                if any(keyword in text.lower() for keyword in ['delivered', 'transit', 'shipped', 'arrived', 'departed', 'processed']):
-                                    result['details'].append(text)
-                        except:
-                            continue
-                    if result['details']:
-                        break
-                except:
-                    continue
-        except:
-            pass
-        
-        # If still no status, check page title
-        if result['status'] == 'Unknown':
-            try:
-                title = page.title()
-                if title:
-                    result['page_title'] = title
-                    # Try to extract status from title
-                    for pattern in status_patterns:
-                        if pattern in title.lower():
-                            result['status'] = pattern.title()
+        # Look for "Latest Update" section
+        if 'Latest Update' in text:
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if 'Latest Update' in line:
+                    # Get the next few lines
+                    for j in range(i+1, min(i+10, len(lines))):
+                        next_line = lines[j].strip()
+                        if next_line and len(next_line) > 20:
+                            result['details'].append(next_line)
+                            # Try to extract status from this line
+                            if 'received' in next_line.lower():
+                                result['status'] = 'Shipment Received'
+                            elif 'accepted' in next_line.lower():
+                                result['status'] = 'Accepted'
+                            elif 'in transit' in next_line.lower():
+                                result['status'] = 'In Transit'
+                            elif 'delivered' in next_line.lower():
+                                result['status'] = 'Delivered'
+                            elif 'out for delivery' in next_line.lower():
+                                result['status'] = 'Out for Delivery'
                             break
-            except:
-                pass
         
-        # Get any error messages
-        try:
-            error_elem = page.locator('.error-message, .alert-error, [class*="error"]').first
-            if error_elem.is_visible():
-                result['error_message'] = error_elem.inner_text().strip()
-        except:
-            pass
+        # Look for status indicators in the full text
+        status_map = {
+            'delivered': 'Delivered',
+            'out for delivery': 'Out for Delivery',
+            'in transit': 'In Transit',
+            'shipment received': 'Shipment Received',
+            'package acceptance pending': 'Acceptance Pending',
+            'arrived at': 'Arrived',
+            'departed': 'Departed',
+            'picked up': 'Picked Up'
+        }
+        
+        text_lower = text.lower()
+        for keyword, status in status_map.items():
+            if keyword in text_lower:
+                result['status'] = status
+                break
+        
+        # Extract location information
+        import re
+        location_pattern = r'([A-Z][a-z]+(?:\s[A-Z][a-z]+)?),?\s*[A-Z]{2}\s*\d{5}'
+        locations = re.findall(location_pattern, text)
+        if locations:
+            result['location'] = locations[0]
+        
+        # Extract dates
+        date_pattern = r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}'
+        dates = re.findall(date_pattern, text)
+        if dates:
+            result['date'] = dates[0]
+        
+        # Look for tracking history/events
+        if 'Status' in text or 'Accepted' in text:
+            lines = text.split('\n')
+            collecting = False
+            for line in lines:
+                line = line.strip()
+                if 'Status' in line or 'Accepted' in line or 'Received' in line:
+                    collecting = True
+                if collecting and line and len(line) > 10 and len(line) < 200:
+                    # Skip common non-event text
+                    skip_words = ['FAQ', 'Help', 'Search', 'Privacy', 'Terms', 'Careers', 'Feedback']
+                    if not any(word in line for word in skip_words):
+                        if line not in result['details']:
+                            result['details'].append(line)
+                            if len(result['details']) >= 5:
+                                break
         
     except Exception as e:
         result['error'] = str(e)
