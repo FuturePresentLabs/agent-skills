@@ -40,6 +40,16 @@ Convert an input image into a watertight, 3D-printable **bas-relief STL** via a 
 
 **Path:** `skills/image-to-relief-stl`
 
+### `package-tracking`
+Look up package tracking information for FedEx, UPS, USPS, and Ward trucking/logistics.
+
+- Extract tracking numbers from emails/text
+- Identify carrier from tracking number format
+- Generate direct tracking URLs
+- Delivery time estimates
+
+**Path:** `skills/package-tracking`
+
 ---
 
 ## Install / Use
@@ -88,6 +98,15 @@ bash skills/trace-to-svg/scripts/trace_to_svg.sh input.png /tmp/out.svg
 ```bash
 bash skills/image-to-relief-stl/scripts/image_to_relief.sh input.png --out /tmp/relief.stl \
   --mode grayscale --min-height 0.0 --max-height 3.0 --base 1.2 --pixel 0.5
+```
+
+### `package-tracking`
+```bash
+# Look up a tracking number (auto-detects carrier)
+python3 skills/package-tracking/scripts/track_package.py --number 9434650206217168190787
+
+# Extract tracking numbers from email text
+python3 skills/package-tracking/scripts/track_package.py --extract --number "<email text>"
 ```
 
 ---
