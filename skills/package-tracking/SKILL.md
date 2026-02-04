@@ -1,6 +1,6 @@
 ---
 name: package-tracking
-description: Look up package tracking information for FedEx, UPS, USPS, and Ward trucking/logistics carriers. Use when users need to check shipping status, delivery estimates, or track packages by tracking number. Supports extracting tracking numbers from emails, checking delivery status across multiple carriers, and providing direct tracking links.
+description: Look up package tracking information for FedEx, UPS, USPS, and Ward trucking/logistics carriers. Use when users need to check shipping status, delivery estimates, or track packages by tracking number. Supports extracting tracking numbers from emails, checking delivery status across multiple carriers, and providing direct tracking links. For USPS and Ward, uses Playwright with headless Chromium to render JavaScript-heavy tracking pages.
 ---
 
 # Package Tracking
@@ -9,10 +9,28 @@ Look up package tracking information across major carriers.
 
 ## Supported Carriers
 
-- **USPS** - United States Postal Service
-- **UPS** - United Parcel Service  
-- **FedEx** - Federal Express
-- **Ward** - Ward Trucking/Logistics
+- **USPS** - United States Postal Service (via Playwright/headless browser)
+- **UPS** - United Parcel Service (API-based)
+- **FedEx** - Federal Express (API-based)
+- **Ward** - Ward Trucking/Logistics (via Playwright/headless browser)
+
+## Installation
+
+### Basic (URLs only)
+No additional dependencies required.
+
+### Full Tracking with Playwright (Recommended)
+For USPS and Ward tracking details, install Playwright:
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+Or use the built-in installer:
+```bash
+./scripts/track_package.py --install
+```
 
 ## Usage Patterns
 
@@ -20,24 +38,23 @@ Look up package tracking information across major carriers.
 
 When given a tracking number, identify the carrier and look up status:
 
-```
-Track package 1Z999AA10123456784
+```bash
+./scripts/track_package.py --number 1Z999AA10123456784
 ```
 
 ### Extract from Email
 
-When given an email or message containing tracking info, extract the tracking number and look it up:
+Extract tracking numbers from email text:
 
+```bash
+./scripts/track_package.py --extract --number "Your order shipped! Track: 1Z999..."
 ```
-Find the tracking number in this email and check status
-```
 
-### Check Multiple Carriers
+### Force Specific Carrier
 
-For ambiguous tracking numbers, check multiple carriers:
-
-```
-Track 9400111899223456789012
+```bash
+./scripts/track_package.py --carrier usps --number 9400111899223456789012
+./scripts/track_package.py --carrier ward --number 0210355075
 ```
 
 ## Tracking Number Patterns
@@ -50,7 +67,7 @@ Track 9400111899223456789012
 | UPS | 123456789012 | 12 digits (alternate) |
 | FedEx | 123456789012 | 12 digits |
 | FedEx | 1234567890123456 | 15 digits |
-| Ward | Various | Contact Ward directly |
+| Ward | 0210355075 | 7-10 digit PRO number |
 
 ## Quick Reference
 
@@ -58,17 +75,7 @@ Track 9400111899223456789012
 - USPS: https://tools.usps.com/go/TrackConfirmAction?tLabels=<NUMBER>
 - UPS: https://www.ups.com/track?tracknum=<NUMBER>
 - FedEx: https://www.fedex.com/apps/fedextrack/?tracknumbers=<NUMBER>
-- Ward: https://www.wardtrucking.com/tracking (requires login)
-
-## Using the Lookup Script
-
-For programmatic tracking lookups:
-
-```bash
-./scripts/track_package.py --carrier usps --number 9400111899223456789012
-./scripts/track_package.py --carrier ups --number 1Z999AA10123456784
-./scripts/track_package.py --carrier fedex --number 123456789012
-```
+- Ward: https://wardtlctools.com/wardtrucking/traceshipment/create
 
 ## Delivery Time Estimates
 
@@ -81,11 +88,28 @@ Typical ground shipping times (business days):
 
 **Note:** USPS tracking may take 1-3 business days to populate in their system after label creation.
 
-## When Tracking Data Isn't Available
+## How It Works
 
-1. **Label created, no movement** - Package dropped off but not yet scanned
-2. **No data yet** - USPS often takes 1-3 days to show tracking updates
-3. **Delivered** - Check mailbox/porch, may not show "delivered" status
-4. **Invalid number** - Double-check the tracking number with sender
+### USPS & Ward (JavaScript-Heavy Sites)
+Uses Playwright with headless Chromium to:
+1. Load the tracking page
+2. Wait for JavaScript to render tracking data
+3. Extract status, delivery estimates, and tracking history
 
-For Ward trucking, contact their customer service directly at 1-800-沃德 or use their portal.
+### UPS & FedEx (API-Based)
+Provides direct tracking URLs. Full API integration can be added with carrier API keys.
+
+## Troubleshooting
+
+**"Playwright not installed" error:**
+```bash
+pip install playwright
+playwright install chromium
+```
+
+**Slow performance:** First run downloads Chromium (~110MB). Subsequent runs are fast.
+
+**No tracking data found:**
+1. Check that the tracking number is correct
+2. Wait 24 hours for USPS labels to activate
+3. For Ward, verify the PRO number with the shipper
